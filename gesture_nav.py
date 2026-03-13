@@ -20,6 +20,7 @@ import sys
 import cv2
 import mediapipe as mp
 import numpy as np
+import pyautogui
 
 from gestures import Gesture, GestureRecogniser, detect_pinch
 from file_navigator import FileNavigator
@@ -111,6 +112,12 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
         sys.exit(1)
 
     last_gesture = Gesture.NONE
+    # Pixel X coordinate of the wrist in the previous frame (None until first frame)
+    prev_wrist_x_px: int | None = None
+    # Cooldown counter to avoid repeated arrow-key presses on sustained movement
+    wrist_swipe_cooldown: int = 0
+    _WRIST_SWIPE_COOLDOWN_FRAMES = 15
+    _WRIST_SWIPE_PIXEL_THRESHOLD = 100
 
     with mp_hands.Hands(
         model_complexity=0,
@@ -133,6 +140,10 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
 
             gesture = Gesture.NONE
 
+            # Tick wrist-swipe cooldown every frame
+            if wrist_swipe_cooldown > 0:
+                wrist_swipe_cooldown -= 1
+
             if results.multi_hand_landmarks:
                 hand_landmarks = results.multi_hand_landmarks[0]
                 lm = hand_landmarks.landmark  # list of NormalizedLandmark
@@ -144,13 +155,39 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
                 pinching = detect_pinch(lm, pinch_threshold)
                 _draw_pinch_indicator(frame, lm, pinching)
                 if pinching:
-                    print("Pinch Detected")  # required user-visible feedback
+                    try:
+                        pyautogui.press("return")
+                    except Exception:
+                        pass  # pyautogui may fail in headless environments — ignore
+
+                # ── Wrist X pixel tracking → Left / Right Arrow key ──────────
+                h, w = frame.shape[:2]
+                wrist_x_px = int(lm[0].x * w)
+                if prev_wrist_x_px is not None and wrist_swipe_cooldown == 0:
+                    delta_x = wrist_x_px - prev_wrist_x_px
+                    if delta_x > _WRIST_SWIPE_PIXEL_THRESHOLD:
+                        try:
+                            pyautogui.press("right")
+                        except Exception:
+                            pass  # pyautogui may fail in headless environments — ignore
+                        wrist_swipe_cooldown = _WRIST_SWIPE_COOLDOWN_FRAMES
+                    elif delta_x < -_WRIST_SWIPE_PIXEL_THRESHOLD:
+                        try:
+                            pyautogui.press("left")
+                        except Exception:
+                            pass  # pyautogui may fail in headless environments — ignore
+                        wrist_swipe_cooldown = _WRIST_SWIPE_COOLDOWN_FRAMES
+                prev_wrist_x_px = wrist_x_px
 
                 # ── Full gesture classification ──────────────────────────────
                 gesture = recogniser.update(lm)
                 if gesture != Gesture.NONE:
                     last_gesture = gesture
                     navigator.handle_gesture(gesture, wrist_y=lm[0].y)
+            else:
+                # No hand detected — reset wrist tracking so the next detection
+                # starts fresh without a stale previous position.
+                prev_wrist_x_px = None
 
             # ── HUD overlay ──────────────────────────────────────────────────
             _draw_hud(
