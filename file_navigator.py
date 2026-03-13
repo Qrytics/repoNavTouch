@@ -14,6 +14,40 @@ import pyautogui
 from gestures import Gesture
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Standalone helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def list_folders(directory) -> list:
+    """
+    List all subdirectories in *directory* using ``os`` and ``pathlib``.
+
+    Parameters
+    ----------
+    directory : str | Path
+        The directory to inspect.
+
+    Returns
+    -------
+    list[Path]
+        Alphabetically sorted list of :class:`~pathlib.Path` objects, one per
+        immediate subdirectory found under *directory*.  Returns an empty list
+        when *directory* is inaccessible (e.g. ``PermissionError``).
+    """
+    path = Path(directory)
+    try:
+        return sorted(
+            [
+                path / entry
+                for entry in os.listdir(path)
+                if (path / entry).is_dir()
+            ],
+            key=lambda p: p.name.lower(),
+        )
+    except OSError:
+        return []
+
+
 class FileNavigator:
     """
     Maintains a current working directory and translates Gesture events into
@@ -30,9 +64,11 @@ class FileNavigator:
         self._cwd = Path(start_path or Path.home()).resolve()
         self._history: list[Path] = []   # backward history stack
         self._forward: list[Path] = []   # forward history stack
-        self._scroll_offset: int = 0     # index into directory listing
+        self._scroll_offset: int = 0     # index into full directory listing
 
         self._listing: list[Path] = []
+        self._folder_listing: list[Path] = []  # subdirectories only
+        self._current_index: int = 0            # index into _folder_listing
         self._refresh_listing()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -48,6 +84,16 @@ class FileNavigator:
         return self._listing
 
     @property
+    def folders(self) -> list[Path]:
+        """Subdirectories only, sorted alphabetically."""
+        return self._folder_listing
+
+    @property
+    def current_index(self) -> int:
+        """Index of the currently selected folder in :attr:`folders`."""
+        return self._current_index
+
+    @property
     def scroll_offset(self) -> int:
         return self._scroll_offset
 
@@ -61,7 +107,9 @@ class FileNavigator:
         except PermissionError:
             entries = []
         self._listing = entries
+        self._folder_listing = list_folders(self._cwd)
         self._scroll_offset = 0
+        self._current_index = 0
 
     def _navigate_to(self, path: Path):
         self._history.append(self._cwd)
@@ -157,6 +205,50 @@ class FileNavigator:
         except Exception:
             pass
 
+    def advance_folder_index(self):
+        """
+        Increment *current_index* through the folder-only listing (Right Arrow gesture).
+
+        The index wraps around so the last folder is followed by the first.
+        Prints the newly selected folder name each time it advances.
+        """
+        if not self._folder_listing:
+            print("[nav] No subdirectories in current directory.")
+            return
+        self._current_index = (self._current_index + 1) % len(self._folder_listing)
+        print(
+            f"[nav] folder index → {self._current_index}: "
+            f"{self._folder_listing[self._current_index].name}"
+        )
+
+    def print_directory_structure(self):
+        """Print the current directory's full contents to the console."""
+        print(f"\n[dir] {self._cwd}")
+        for entry in self._listing:
+            prefix = "📁" if entry.is_dir() else "📄"
+            print(f"  {prefix} {entry.name}")
+        print()
+
+    def enter_current_folder(self):
+        """
+        Change the working directory to the folder at *current_index* (Pinch gesture).
+
+        Uses ``os.chdir`` to update the process working directory and
+        :meth:`_navigate_to` to update the internal navigator state.
+        Prints the new directory structure after the move.
+        """
+        if not self._folder_listing:
+            print("[nav] No subdirectories to enter.")
+            return
+        target = self._folder_listing[self._current_index]
+        try:
+            os.chdir(target)
+        except OSError as exc:
+            print(f"[nav] Cannot chdir to {target}: {exc}")
+            return
+        self._navigate_to(target)
+        self.print_directory_structure()
+
     # ──────────────────────────────────────────────────────────────────────────
     # Gesture → action dispatcher
     # ──────────────────────────────────────────────────────────────────────────
@@ -174,8 +266,8 @@ class FileNavigator:
             Used to determine scroll direction for OPEN_PALM_SCROLL.
         """
         if gesture == Gesture.PINCH:
-            print("[gesture] Pinch Detected → select")
-            self.select()
+            print("[gesture] Pinch Detected → enter current folder")
+            self.enter_current_folder()
 
         elif gesture == Gesture.TWO_FINGERS_UP:
             print("[gesture] Two Fingers Up → cd ..")
@@ -186,8 +278,8 @@ class FileNavigator:
             self.go_back()
 
         elif gesture == Gesture.SWIPE_RIGHT:
-            print("[gesture] Swipe Right → go forward")
-            self.go_forward()
+            print("[gesture] Swipe Right → advance folder index")
+            self.advance_folder_index()
 
         elif gesture == Gesture.OPEN_PALM_SCROLL:
             # Wrist in upper half of frame → scroll up, lower half → scroll down
