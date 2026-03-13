@@ -31,6 +31,11 @@ file_navigator_mod = types.ModuleType("file_navigator")
 file_navigator_mod.FileNavigator = MagicMock()
 sys.modules["file_navigator"] = file_navigator_mod
 
+# overlay stub (avoids tkinter / display requirements)
+overlay_mod = types.ModuleType("overlay")
+overlay_mod.OverlayWindow = MagicMock()
+sys.modules["overlay"] = overlay_mod
+
 # gestures stub — import the real module so Gesture enum is correct
 from gestures import Gesture, detect_pinch  # noqa: E402
 

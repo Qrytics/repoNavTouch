@@ -24,6 +24,7 @@ import pyautogui
 
 from gestures import Gesture, GestureRecogniser, detect_pinch
 from file_navigator import FileNavigator
+from overlay import OverlayWindow
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MediaPipe setup
@@ -106,8 +107,14 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
     recogniser = GestureRecogniser(pinch_threshold=pinch_threshold)
     navigator = FileNavigator()
 
+    # ── Transparent overlay (runs in background daemon thread) ────────────────
+    overlay = OverlayWindow()
+    overlay.start()
+    overlay.set_cwd(navigator.cwd)
+
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
+        overlay.destroy()
         print(f"[error] Cannot open camera {camera_index}.", file=sys.stderr)
         sys.exit(1)
 
@@ -184,10 +191,17 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
                 if gesture != Gesture.NONE:
                     last_gesture = gesture
                     navigator.handle_gesture(gesture, wrist_y=lm[0].y)
+
+                # ── Update overlay: index-finger tip (landmark 8) position ────
+                overlay.set_finger_pos(lm[8].x, lm[8].y)
             else:
                 # No hand detected — reset wrist tracking so the next detection
                 # starts fresh without a stale previous position.
                 prev_wrist_x_px = None
+                overlay.set_finger_pos(None, None)  # hide glow circle
+
+            # ── Keep overlay breadcrumb current ───────────────────────────────
+            overlay.set_cwd(navigator.cwd)
 
             # ── HUD overlay ──────────────────────────────────────────────────
             _draw_hud(
@@ -206,6 +220,7 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
 
     cap.release()
     cv2.destroyAllWindows()
+    overlay.destroy()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
