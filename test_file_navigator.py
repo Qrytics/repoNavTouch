@@ -65,7 +65,7 @@ class TestFileNavigatorInit(unittest.TestCase):
 
     def test_custom_start_path(self):
         nav = FileNavigator(start_path="/tmp")
-        self.assertEqual(nav.cwd, Path("/tmp"))
+        self.assertEqual(nav.cwd, Path("/tmp").resolve())
 
     def test_listing_is_populated(self):
         nav = FileNavigator(start_path="/tmp")
