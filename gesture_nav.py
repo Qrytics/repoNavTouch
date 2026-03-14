@@ -16,6 +16,9 @@ Press  Q  or  Esc  to quit.
 
 import argparse
 import sys
+import time
+import urllib.request
+from pathlib import Path
 
 import cv2
 import mediapipe as mp
@@ -27,12 +30,37 @@ from file_navigator import FileNavigator
 from overlay import OverlayWindow
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MediaPipe setup
+# MediaPipe setup (Tasks API — mediapipe >= 0.10.x)
 # ──────────────────────────────────────────────────────────────────────────────
 
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+_mp_vision = mp.tasks.vision
+_mp_base = mp.tasks.BaseOptions
+
+# Hand landmarker model (downloaded on first run and cached in ~/.cache)
+_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+)
+_MODEL_PATH = Path.home() / ".cache" / "reponavtouch" / "hand_landmarker.task"
+
+
+def _ensure_model() -> Path:
+    """Download the hand landmarker model if it is not already cached."""
+    if not _MODEL_PATH.exists():
+        _MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[model] Downloading hand landmarker model to {_MODEL_PATH} …")
+        try:
+            urllib.request.urlretrieve(_MODEL_URL, _MODEL_PATH)
+        except Exception as exc:
+            # Remove any partial download before re-raising
+            if _MODEL_PATH.exists():
+                _MODEL_PATH.unlink()
+            raise RuntimeError(
+                f"[model] Failed to download hand landmarker model from {_MODEL_URL}: {exc}"
+            ) from exc
+        print("[model] Download complete.")
+    return _MODEL_PATH
+
 
 # Colour used to highlight the pinch pair (BGR)
 _PINCH_COLOUR = (0, 255, 0)   # green when pinching
@@ -42,14 +70,14 @@ _DEFAULT_COLOUR = (255, 0, 0)  # blue otherwise
 # Overlay helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _draw_landmarks(frame, hand_landmarks):
+def _draw_landmarks(frame, lm):
     """Draw all 21 hand landmarks and their connections onto *frame*."""
-    mp_drawing.draw_landmarks(
+    _mp_vision.drawing_utils.draw_landmarks(
         frame,
-        hand_landmarks,
-        mp_hands.HAND_CONNECTIONS,
-        mp_drawing_styles.get_default_hand_landmarks_style(),
-        mp_drawing_styles.get_default_hand_connections_style(),
+        lm,
+        _mp_vision.HandLandmarksConnections.HAND_CONNECTIONS,
+        _mp_vision.drawing_styles.get_default_hand_landmarks_style(),
+        _mp_vision.drawing_styles.get_default_hand_connections_style(),
     )
 
 
@@ -126,12 +154,22 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
     _WRIST_SWIPE_COOLDOWN_FRAMES = 15
     _WRIST_SWIPE_PIXEL_THRESHOLD = 100
 
-    with mp_hands.Hands(
-        model_complexity=0,
-        min_detection_confidence=0.6,
+    # Ensure the hand landmarker model is available (downloads on first run)
+    model_path = _ensure_model()
+
+    options = _mp_vision.HandLandmarkerOptions(
+        base_options=_mp_base(model_asset_path=str(model_path)),
+        running_mode=_mp_vision.RunningMode.VIDEO,
+        num_hands=1,
+        min_hand_detection_confidence=0.6,
+        min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5,
-        max_num_hands=1,
-    ) as hands:
+    )
+
+    # Monotonic clock reference so timestamps are always increasing
+    _start_time = time.monotonic()
+
+    with _mp_vision.HandLandmarker.create_from_options(options) as landmarker:
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -141,9 +179,12 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
             # Flip horizontally for a mirror view, then convert colour space
             frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            rgb.flags.writeable = False
-            results = hands.process(rgb)
-            rgb.flags.writeable = True
+
+            # Build a MediaPipe Image and compute a monotonic timestamp (ms)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            timestamp_ms = int((time.monotonic() - _start_time) * 1000)
+
+            results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
             gesture = Gesture.NONE
 
@@ -151,12 +192,11 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
             if wrist_swipe_cooldown > 0:
                 wrist_swipe_cooldown -= 1
 
-            if results.multi_hand_landmarks:
-                hand_landmarks = results.multi_hand_landmarks[0]
-                lm = hand_landmarks.landmark  # list of NormalizedLandmark
+            if results.hand_landmarks:
+                lm = results.hand_landmarks[0]
 
                 # ── Draw landmarks ───────────────────────────────────────────
-                _draw_landmarks(frame, hand_landmarks)
+                _draw_landmarks(frame, lm)
 
                 # ── Pinch detection (always shown, even outside cooldown) ────
                 pinching = detect_pinch(lm, pinch_threshold)
