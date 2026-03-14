@@ -104,7 +104,7 @@ class FileNavigator:
     def _refresh_listing(self):
         try:
             entries = sorted(self._cwd.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-        except PermissionError:
+        except OSError:
             entries = []
         self._listing = entries
         self._folder_listing = list_folders(self._cwd)
