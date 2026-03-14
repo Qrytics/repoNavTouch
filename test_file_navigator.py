@@ -10,10 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Patch pyautogui before importing file_navigator so no display is required
-sys.modules["pyautogui"] = MagicMock()
-
-from file_navigator import FileNavigator, list_folders  # noqa: E402 (import after sys.modules patch)
+from file_navigator import FileNavigator, list_folders  # noqa: E402
 from gestures import Gesture                             # noqa: E402
 
 
@@ -299,10 +296,10 @@ class TestHandleGesture(unittest.TestCase):
     def setUp(self):
         self.nav = FileNavigator(start_path="/tmp")
 
-    def test_pinch_calls_enter_current_folder(self):
-        with patch.object(self.nav, "enter_current_folder") as mock_enter:
+    def test_pinch_calls_select(self):
+        with patch.object(self.nav, "select") as mock_select:
             self.nav.handle_gesture(Gesture.PINCH)
-            mock_enter.assert_called_once()
+            mock_select.assert_called_once()
 
     def test_two_fingers_up_calls_go_up(self):
         with patch.object(self.nav, "go_up") as mock_up:
@@ -314,10 +311,10 @@ class TestHandleGesture(unittest.TestCase):
             self.nav.handle_gesture(Gesture.SWIPE_LEFT)
             mock_back.assert_called_once()
 
-    def test_swipe_right_calls_advance_folder_index(self):
-        with patch.object(self.nav, "advance_folder_index") as mock_adv:
+    def test_swipe_right_calls_go_forward(self):
+        with patch.object(self.nav, "go_forward") as mock_fwd:
             self.nav.handle_gesture(Gesture.SWIPE_RIGHT)
-            mock_adv.assert_called_once()
+            mock_fwd.assert_called_once()
 
     def test_open_palm_scroll_direction_upper_half(self):
         """Wrist in upper half (y < 0.5) should scroll up."""

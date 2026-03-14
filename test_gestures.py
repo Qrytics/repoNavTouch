@@ -226,7 +226,8 @@ class TestGestureRecogniser(unittest.TestCase):
         })
 
     def test_pinch_fires_once_then_cooldown(self):
-        rec = GestureRecogniser(pinch_threshold=0.07, cooldown_frames=5)
+        # hold_frames=1 so the gesture fires on the first update; cooldown_frames=5
+        rec = GestureRecogniser(pinch_threshold=0.07, cooldown_frames=5, hold_frames=1)
         lm = self._pinch_landmarks()
         first = rec.update(lm)
         self.assertEqual(first, Gesture.PINCH)
@@ -236,10 +237,10 @@ class TestGestureRecogniser(unittest.TestCase):
             self.assertNotEqual(g, Gesture.PINCH)
 
     def test_pinch_fires_again_after_cooldown(self):
-        # cooldown_frames=3: fire sets cooldown to 3; each update ticks it down
-        # by 1 at the start, so the gesture re-fires on the (cooldown+1)-th
-        # update after the initial fire: drain 2 frames then check the 3rd.
-        rec = GestureRecogniser(pinch_threshold=0.07, cooldown_frames=3)
+        # cooldown_frames=3, hold_frames=1: fire sets cooldown to 3; each update
+        # ticks it down by 1, so the gesture re-fires on the (cooldown+1)-th
+        # update after the initial fire.
+        rec = GestureRecogniser(pinch_threshold=0.07, cooldown_frames=3, hold_frames=1)
         lm = self._pinch_landmarks()
         rec.update(lm)  # fire → cooldown = 3
         for _ in range(2):
@@ -247,8 +248,40 @@ class TestGestureRecogniser(unittest.TestCase):
         g = rec.update(lm)  # tick 1→0, now ready → fires again
         self.assertEqual(g, Gesture.PINCH)
 
+    def test_pinch_requires_hold_frames(self):
+        """PINCH must be held for hold_frames consecutive frames before firing."""
+        hold = 4
+        rec = GestureRecogniser(pinch_threshold=0.07, cooldown_frames=5, hold_frames=hold)
+        lm = self._pinch_landmarks()
+        # Feed hold-1 frames: no fire yet
+        for i in range(hold - 1):
+            g = rec.update(lm)
+            self.assertNotEqual(g, Gesture.PINCH, f"fired too early on frame {i+1}")
+        # hold-th frame: fires
+        g = rec.update(lm)
+        self.assertEqual(g, Gesture.PINCH)
+
+    def test_hold_counter_resets_on_gesture_break(self):
+        """Releasing the gesture mid-hold resets the counter so the next attempt
+        must be held from the beginning again."""
+        hold = 4
+        rec = GestureRecogniser(pinch_threshold=0.07, cooldown_frames=5, hold_frames=hold)
+        pinch_lm = self._pinch_landmarks()
+        no_pinch_lm = _make_landmarks({4: (0.5, 0.5), 8: (0.8, 0.5)})
+
+        # Hold for hold-1 frames (not enough to fire)
+        for _ in range(hold - 1):
+            rec.update(pinch_lm)
+        # Release gesture for one frame
+        rec.update(no_pinch_lm)
+        # Now hold for hold-1 frames again — still should not fire (counter reset)
+        for i in range(hold - 1):
+            g = rec.update(pinch_lm)
+            self.assertNotEqual(g, Gesture.PINCH, f"fired after counter reset on frame {i+1}")
+
     def test_two_fingers_up_detected(self):
-        rec = GestureRecogniser(cooldown_frames=5)
+        # hold_frames=1 so it fires on the first update
+        rec = GestureRecogniser(cooldown_frames=5, hold_frames=1)
         lm = self._peace_landmarks()
         g = rec.update(lm)
         self.assertEqual(g, Gesture.TWO_FINGERS_UP)

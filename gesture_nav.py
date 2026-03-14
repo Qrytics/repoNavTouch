@@ -10,6 +10,7 @@ Act  : FileNavigator translates the Gesture into OS-level navigation commands.
 Usage
 -----
     python gesture_nav.py [--camera INDEX] [--pinch-threshold FLOAT]
+                          [--start-dir PATH]
 
 Press  Q  or  Esc  to quit.
 """
@@ -23,7 +24,6 @@ from pathlib import Path
 import cv2
 import mediapipe as mp
 import numpy as np
-import pyautogui
 
 from gestures import Gesture, GestureRecogniser, detect_pinch
 from file_navigator import FileNavigator
@@ -130,10 +130,10 @@ def _draw_hud(frame, gesture: Gesture, cwd: str, listing, scroll_offset: int):
 # Main loop
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run(camera_index: int = 0, pinch_threshold: float = 0.07):
+def run(camera_index: int = 0, pinch_threshold: float = 0.07, start_path=None):
     """Open the webcam and start the gesture navigation loop."""
     recogniser = GestureRecogniser(pinch_threshold=pinch_threshold)
-    navigator = FileNavigator()
+    navigator = FileNavigator(start_path=start_path)
 
     # ── Transparent overlay (runs in background daemon thread) ────────────────
     overlay = OverlayWindow()
@@ -147,12 +147,6 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
         sys.exit(1)
 
     last_gesture = Gesture.NONE
-    # Pixel X coordinate of the wrist in the previous frame (None until first frame)
-    prev_wrist_x_px: int | None = None
-    # Cooldown counter to avoid repeated arrow-key presses on sustained movement
-    wrist_swipe_cooldown: int = 0
-    _WRIST_SWIPE_COOLDOWN_FRAMES = 15
-    _WRIST_SWIPE_PIXEL_THRESHOLD = 100
 
     # Ensure the hand landmarker model is available (downloads on first run)
     model_path = _ensure_model()
@@ -161,13 +155,16 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
         base_options=_mp_base(model_asset_path=str(model_path)),
         running_mode=_mp_vision.RunningMode.VIDEO,
         num_hands=1,
-        min_hand_detection_confidence=0.6,
-        min_hand_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
+        min_hand_detection_confidence=0.7,
+        min_hand_presence_confidence=0.6,
+        min_tracking_confidence=0.6,
     )
 
     # Monotonic clock reference so timestamps are always increasing
     _start_time = time.monotonic()
+    # Track the last timestamp sent to MediaPipe so we can guarantee strict
+    # monotonicity even when two frames are captured within the same millisecond.
+    _last_timestamp_ms: int = -1
 
     with _mp_vision.HandLandmarker.create_from_options(options) as landmarker:
         while True:
@@ -180,17 +177,19 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
             frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # Build a MediaPipe Image and compute a monotonic timestamp (ms)
+            # Build a MediaPipe Image and compute a monotonic timestamp (ms).
+            # Guard against two frames landing in the same millisecond by
+            # clamping the value to always be strictly greater than the last
+            # one sent to MediaPipe (the library raises ValueError otherwise).
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             timestamp_ms = int((time.monotonic() - _start_time) * 1000)
+            if timestamp_ms <= _last_timestamp_ms:
+                timestamp_ms = _last_timestamp_ms + 1
+            _last_timestamp_ms = timestamp_ms
 
             results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
             gesture = Gesture.NONE
-
-            # Tick wrist-swipe cooldown every frame
-            if wrist_swipe_cooldown > 0:
-                wrist_swipe_cooldown -= 1
 
             if results.hand_landmarks:
                 lm = results.hand_landmarks[0]
@@ -198,33 +197,9 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
                 # ── Draw landmarks ───────────────────────────────────────────
                 _draw_landmarks(frame, lm)
 
-                # ── Pinch detection (always shown, even outside cooldown) ────
+                # ── Pinch detection (shown even outside cooldown) ────────────
                 pinching = detect_pinch(lm, pinch_threshold)
                 _draw_pinch_indicator(frame, lm, pinching)
-                if pinching:
-                    try:
-                        pyautogui.press("return")
-                    except Exception:
-                        pass  # pyautogui may fail in headless environments — ignore
-
-                # ── Wrist X pixel tracking → Left / Right Arrow key ──────────
-                h, w = frame.shape[:2]
-                wrist_x_px = int(lm[0].x * w)
-                if prev_wrist_x_px is not None and wrist_swipe_cooldown == 0:
-                    delta_x = wrist_x_px - prev_wrist_x_px
-                    if delta_x > _WRIST_SWIPE_PIXEL_THRESHOLD:
-                        try:
-                            pyautogui.press("right")
-                        except Exception:
-                            pass  # pyautogui may fail in headless environments — ignore
-                        wrist_swipe_cooldown = _WRIST_SWIPE_COOLDOWN_FRAMES
-                    elif delta_x < -_WRIST_SWIPE_PIXEL_THRESHOLD:
-                        try:
-                            pyautogui.press("left")
-                        except Exception:
-                            pass  # pyautogui may fail in headless environments — ignore
-                        wrist_swipe_cooldown = _WRIST_SWIPE_COOLDOWN_FRAMES
-                prev_wrist_x_px = wrist_x_px
 
                 # ── Full gesture classification ──────────────────────────────
                 gesture = recogniser.update(lm)
@@ -235,9 +210,7 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
                 # ── Update overlay: index-finger tip (landmark 8) position ────
                 overlay.set_finger_pos(lm[8].x, lm[8].y)
             else:
-                # No hand detected — reset wrist tracking so the next detection
-                # starts fresh without a stale previous position.
-                prev_wrist_x_px = None
+                # No hand detected — reset hold-state so next detection starts fresh.
                 overlay.set_finger_pos(None, None)  # hide glow circle
 
             # ── Keep overlay breadcrumb current ───────────────────────────────
@@ -267,6 +240,27 @@ def run(camera_index: int = 0, pinch_threshold: float = 0.07):
 # CLI entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _ask_start_dir() -> Path:
+    """
+    Interactively prompt the user for the starting directory.
+
+    Accepts a blank answer (uses the home directory), ``~``-prefixed paths,
+    and relative or absolute paths.  Re-prompts if the path does not exist
+    or is not a directory.
+    """
+    default = Path.home()
+    print("\nrepoNavTouch -- Hand Gesture File Navigator")
+    print("-----------------------------------------")
+    while True:
+        raw = input(f"Starting directory [{default}]: ").strip()
+        if not raw:
+            return default
+        candidate = Path(raw).expanduser().resolve()
+        if candidate.is_dir():
+            return candidate
+        print(f"  [!] '{raw}' is not a valid directory. Please try again.")
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="Navigate your file system with hand gestures via webcam."
@@ -285,9 +279,23 @@ def _parse_args():
         metavar="FLOAT",
         help="Normalised distance threshold for pinch detection (default: 0.07).",
     )
+    parser.add_argument(
+        "--start-dir",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Starting directory (default: prompt on startup).",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    run(camera_index=args.camera, pinch_threshold=args.pinch_threshold)
+    if args.start_dir is not None:
+        start = Path(args.start_dir).expanduser().resolve()
+        if not start.is_dir():
+            print(f"[error] --start-dir '{args.start_dir}' is not a valid directory.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        start = _ask_start_dir()
+    run(camera_index=args.camera, pinch_threshold=args.pinch_threshold, start_path=start)
