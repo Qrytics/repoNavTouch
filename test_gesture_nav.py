@@ -7,13 +7,9 @@ All pyautogui calls are patched out so no display or keyboard access is needed.
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 # ── Stub out heavy / display-dependent imports before gesture_nav is imported ─
-
-# pyautogui stub
-pyautogui_mock = MagicMock()
-sys.modules["pyautogui"] = pyautogui_mock
 
 # cv2 stub
 cv2_mock = MagicMock()
@@ -26,7 +22,7 @@ sys.modules["mediapipe"] = mp_mock
 # numpy stub
 sys.modules["numpy"] = MagicMock()
 
-# file_navigator stub (avoids pyautogui side-effects inside FileNavigator)
+# file_navigator stub (avoids any side-effects inside FileNavigator)
 file_navigator_mod = types.ModuleType("file_navigator")
 file_navigator_mod.FileNavigator = MagicMock()
 sys.modules["file_navigator"] = file_navigator_mod
@@ -70,135 +66,69 @@ def _make_landmarks(wrist_x: float = 0.5, wrist_y: float = 0.5,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Pinch → Return key press
+# Pinch detection (unit-level, no pyautogui side-effects)
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TestPinchPressesReturn(unittest.TestCase):
-    """Verify that a detected pinch triggers pyautogui.press('return')."""
+class TestPinchDetection(unittest.TestCase):
+    """Verify pinch detection logic without any pyautogui dependency."""
 
-    def setUp(self):
-        pyautogui_mock.reset_mock()
-
-    def test_pinch_triggers_return(self):
-        # Thumb tip and index tip very close → pinch detected
+    def test_pinch_detected_when_close(self):
         lm = _make_landmarks(thumb_x=0.5, index_x=0.53)
-        pinching = detect_pinch(lm, threshold=0.07)
-        if pinching:
-            pyautogui_mock.press("return")
-        pyautogui_mock.press.assert_called_with("return")
+        self.assertTrue(detect_pinch(lm, threshold=0.07))
 
-    def test_no_pinch_no_return(self):
-        # Thumb and index far apart → no pinch
+    def test_no_pinch_when_far(self):
         lm = _make_landmarks(thumb_x=0.5, index_x=0.7)
-        pinching = detect_pinch(lm, threshold=0.07)
-        self.assertFalse(pinching)
-        # Simulate the conditional in gesture_nav
-        if pinching:
-            pyautogui_mock.press("return")
-        pyautogui_mock.press.assert_not_called()
+        self.assertFalse(detect_pinch(lm, threshold=0.07))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Wrist X pixel tracking → Arrow key presses
+# Monotonic timestamp guard
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TestWristXPixelTracking(unittest.TestCase):
+class TestMonotonicTimestamp(unittest.TestCase):
     """
-    Exercise the wrist-X pixel-tracking logic extracted from gesture_nav.run().
-
-    The logic under test:
-        wrist_x_px = int(lm[0].x * frame_width)
-        delta_x    = wrist_x_px - prev_wrist_x_px
-        if delta_x > 100  → pyautogui.press("right")
-        if delta_x < -100 → pyautogui.press("left")
-    with a cooldown that suppresses repeated fires.
+    Verify that the timestamp clamping logic in gesture_nav always produces a
+    strictly increasing sequence even when the wall-clock millisecond value does
+    not change between frames.
     """
 
-    _THRESHOLD = 100
-    _COOLDOWN_FRAMES = 15
-    _FRAME_WIDTH = 640
-
-    def _tick(self, prev_x_px, curr_norm_x, cooldown):
+    def _simulate_timestamps(self, raw_ms_values):
         """
-        One iteration of the wrist-tracking block.
-        Returns (key_pressed_or_None, new_prev_x_px, new_cooldown).
+        Run the timestamp-clamping algorithm from gesture_nav over a list of raw
+        monotonic-clock millisecond readings and return the sequence of values
+        that would be forwarded to MediaPipe.
         """
-        pyautogui_mock.reset_mock()
+        last_ts = -1
+        result = []
+        for raw in raw_ms_values:
+            ts = raw if raw > last_ts else last_ts + 1
+            last_ts = ts
+            result.append(ts)
+        return result
 
-        curr_x_px = int(curr_norm_x * self._FRAME_WIDTH)
-        key_pressed = None
+    def test_strictly_increasing_when_clock_repeats(self):
+        # Clock stalls for 3 frames at 1000 ms
+        raw = [999, 1000, 1000, 1000, 1001]
+        out = self._simulate_timestamps(raw)
+        for a, b in zip(out, out[1:]):
+            self.assertGreater(b, a, f"Timestamp not strictly increasing: {out}")
 
-        if cooldown > 0:
-            cooldown -= 1
+    def test_strictly_increasing_normal_sequence(self):
+        raw = [0, 1, 2, 3, 4, 5]
+        out = self._simulate_timestamps(raw)
+        self.assertEqual(out, raw)
 
-        if prev_x_px is not None and cooldown == 0:
-            delta_x = curr_x_px - prev_x_px
-            if delta_x > self._THRESHOLD:
-                pyautogui_mock.press("right")
-                key_pressed = "right"
-                cooldown = self._COOLDOWN_FRAMES
-            elif delta_x < -self._THRESHOLD:
-                pyautogui_mock.press("left")
-                key_pressed = "left"
-                cooldown = self._COOLDOWN_FRAMES
+    def test_first_frame_uses_raw_value(self):
+        raw = [500, 501, 502]
+        out = self._simulate_timestamps(raw)
+        self.assertEqual(out[0], 500)
 
-        return key_pressed, curr_x_px, cooldown
-
-    def test_right_arrow_on_large_rightward_movement(self):
-        # Start at x=0.2 (128 px), jump to x=0.45 (288 px) — delta = 160 px
-        key, _, _ = self._tick(prev_x_px=128, curr_norm_x=0.45, cooldown=0)
-        self.assertEqual(key, "right")
-        pyautogui_mock.press.assert_called_once_with("right")
-
-    def test_left_arrow_on_large_leftward_movement(self):
-        # Start at x=0.8 (512 px), jump to x=0.5 (320 px) — delta = -192 px
-        key, _, _ = self._tick(prev_x_px=512, curr_norm_x=0.5, cooldown=0)
-        self.assertEqual(key, "left")
-        pyautogui_mock.press.assert_called_once_with("left")
-
-    def test_small_movement_does_not_trigger(self):
-        # Move only 50 px — below threshold
-        key, _, _ = self._tick(prev_x_px=300, curr_norm_x=0.55, cooldown=0)
-        self.assertIsNone(key)
-        pyautogui_mock.press.assert_not_called()
-
-    def test_exact_threshold_does_not_trigger(self):
-        # delta == 100 exactly — strictly greater-than is required
-        start_px = 200
-        curr_norm = (start_px + self._THRESHOLD) / self._FRAME_WIDTH
-        key, _, _ = self._tick(prev_x_px=start_px, curr_norm_x=curr_norm, cooldown=0)
-        self.assertIsNone(key)
-        pyautogui_mock.press.assert_not_called()
-
-    def test_no_fire_on_first_frame(self):
-        # prev_wrist_x_px is None on first detection frame
-        pyautogui_mock.reset_mock()
-        prev_wrist_x_px = None
-        cooldown = 0
-        curr_x_px = int(0.9 * self._FRAME_WIDTH)
-        if prev_wrist_x_px is not None and cooldown == 0:
-            delta_x = curr_x_px - prev_wrist_x_px
-            if delta_x > self._THRESHOLD:
-                pyautogui_mock.press("right")
-        pyautogui_mock.press.assert_not_called()
-
-    def test_cooldown_suppresses_repeated_fire(self):
-        # Fire once, then immediately try again with the same large delta.
-        key1, new_prev, cooldown = self._tick(prev_x_px=128, curr_norm_x=0.45, cooldown=0)
-        self.assertEqual(key1, "right")
-        # Second tick — cooldown is still active (15 - 1 = 14 after tick)
-        key2, _, _ = self._tick(prev_x_px=new_prev, curr_norm_x=0.45 + 0.25, cooldown=cooldown)
-        self.assertIsNone(key2)
-
-    def test_cooldown_expires_and_refires(self):
-        # Burn through the entire cooldown, then verify re-fire.
-        _, new_prev, cooldown = self._tick(prev_x_px=128, curr_norm_x=0.45, cooldown=0)
-        # Drain the cooldown (15 frames of small movement)
-        for _ in range(self._COOLDOWN_FRAMES):
-            _, new_prev, cooldown = self._tick(prev_x_px=new_prev, curr_norm_x=new_prev / self._FRAME_WIDTH, cooldown=cooldown)
-        # Now a large rightward delta should fire again
-        key, _, _ = self._tick(prev_x_px=new_prev, curr_norm_x=(new_prev + 200) / self._FRAME_WIDTH, cooldown=cooldown)
-        self.assertEqual(key, "right")
+    def test_backward_jump_is_corrected(self):
+        # Simulate a backward step (should not happen with monotonic, but guard anyway)
+        raw = [100, 99, 98]
+        out = self._simulate_timestamps(raw)
+        for a, b in zip(out, out[1:]):
+            self.assertGreater(b, a)
 
 
 if __name__ == "__main__":

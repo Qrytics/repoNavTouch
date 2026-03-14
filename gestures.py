@@ -110,24 +110,31 @@ class GestureRecogniser:
         How many recent wrist positions to inspect for swipe detection.
     cooldown_frames : int
         Minimum frames between two consecutive gesture events of the same type.
+    hold_frames : int
+        Consecutive frames a static gesture (PINCH, TWO_FINGERS_UP) must be
+        held before it fires.  Prevents accidental triggers from brief flickers.
     """
 
     def __init__(
         self,
         pinch_threshold: float = 0.07,
-        swipe_min_delta: float = 0.15,
+        swipe_min_delta: float = 0.25,
         swipe_history_frames: int = 20,
-        cooldown_frames: int = 15,
+        cooldown_frames: int = 30,
+        hold_frames: int = 8,
     ):
         self.pinch_threshold = pinch_threshold
         self.swipe_min_delta = swipe_min_delta
         self.swipe_history_frames = swipe_history_frames
         self.cooldown_frames = cooldown_frames
+        self.hold_frames = hold_frames
 
         # Circular buffer of recent wrist X positions (normalised 0–1)
         self._wrist_x_history: deque = deque(maxlen=swipe_history_frames)
         # Cooldown counters keyed by Gesture member
         self._cooldowns: dict = {g: 0 for g in Gesture}
+        # Consecutive-frame counters for hold-based gestures
+        self._hold_counters: dict = {g: 0 for g in Gesture}
 
     def _tick_cooldowns(self):
         for key in self._cooldowns:
@@ -153,13 +160,29 @@ class GestureRecogniser:
         wrist_x = landmarks[0].x
         self._wrist_x_history.append(wrist_x)
 
-        # ── Pinch ────────────────────────────────────────────────────────────
-        if detect_pinch(landmarks, self.pinch_threshold) and self._ready(Gesture.PINCH):
-            return self._fire(Gesture.PINCH)
+        # ── Pinch (must be held for hold_frames consecutive frames) ──────────
+        if detect_pinch(landmarks, self.pinch_threshold):
+            self._hold_counters[Gesture.PINCH] += 1
+            if (
+                self._hold_counters[Gesture.PINCH] >= self.hold_frames
+                and self._ready(Gesture.PINCH)
+            ):
+                self._hold_counters[Gesture.PINCH] = 0
+                return self._fire(Gesture.PINCH)
+        else:
+            self._hold_counters[Gesture.PINCH] = 0
 
-        # ── Two fingers up (cd ..) ───────────────────────────────────────────
-        if detect_two_fingers_up(landmarks) and self._ready(Gesture.TWO_FINGERS_UP):
-            return self._fire(Gesture.TWO_FINGERS_UP)
+        # ── Two fingers up (cd .., must be held) ─────────────────────────────
+        if detect_two_fingers_up(landmarks):
+            self._hold_counters[Gesture.TWO_FINGERS_UP] += 1
+            if (
+                self._hold_counters[Gesture.TWO_FINGERS_UP] >= self.hold_frames
+                and self._ready(Gesture.TWO_FINGERS_UP)
+            ):
+                self._hold_counters[Gesture.TWO_FINGERS_UP] = 0
+                return self._fire(Gesture.TWO_FINGERS_UP)
+        else:
+            self._hold_counters[Gesture.TWO_FINGERS_UP] = 0
 
         # ── Swipe (need enough history) ──────────────────────────────────────
         if len(self._wrist_x_history) == self.swipe_history_frames:

@@ -9,8 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pyautogui
-
 from gestures import Gesture
 
 
@@ -120,13 +118,10 @@ class FileNavigator:
         self._send_cd_to_terminal(self._cwd)
 
     def _send_cd_to_terminal(self, path: Path):
-        """Type `cd <path> ↵` into whatever terminal is focused."""
-        try:
-            pyautogui.hotkey("ctrl", "c")          # cancel any running command
-            pyautogui.typewrite(f"cd {path}", interval=0.02)
-            pyautogui.press("enter")
-        except Exception:
-            pass  # pyautogui may fail in headless environments — ignore
+        """No-op: previously forwarded cd commands to the focused terminal via
+        PyAutoGUI, which could inadvertently type into any focused window
+        (browser, editor, etc.).  Navigation state is now shown only in the
+        HUD and overlay to avoid interfering with other applications."""
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public navigation API
@@ -199,11 +194,6 @@ class FileNavigator:
             return
         self._scroll_offset = max(0, min(len(self._listing) - 1, self._scroll_offset + direction))
         print(f"[nav] scroll → {self._listing[self._scroll_offset].name}")
-        try:
-            key = "down" if direction > 0 else "up"
-            pyautogui.press(key)
-        except Exception:
-            pass
 
     def advance_folder_index(self):
         """
@@ -266,8 +256,8 @@ class FileNavigator:
             Used to determine scroll direction for OPEN_PALM_SCROLL.
         """
         if gesture == Gesture.PINCH:
-            print("[gesture] Pinch Detected → enter current folder")
-            self.enter_current_folder()
+            print("[gesture] Pinch Detected → select highlighted item")
+            self.select()
 
         elif gesture == Gesture.TWO_FINGERS_UP:
             print("[gesture] Two Fingers Up → cd ..")
@@ -278,8 +268,8 @@ class FileNavigator:
             self.go_back()
 
         elif gesture == Gesture.SWIPE_RIGHT:
-            print("[gesture] Swipe Right → advance folder index")
-            self.advance_folder_index()
+            print("[gesture] Swipe Right → go forward")
+            self.go_forward()
 
         elif gesture == Gesture.OPEN_PALM_SCROLL:
             # Wrist in upper half of frame → scroll up, lower half → scroll down
